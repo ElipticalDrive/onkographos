@@ -3,43 +3,43 @@
 Also called: Trilinear Interpolant, 3D Linear Interpolation, Trilinear Interpolation for Rectilinear Grids
 
 ## Overview
-Trilinear interpolation estimates the scalar field value at an arbitrary point within a voxel grid by computing a weighted average of the eight surrounding voxel corner values [S1, S6, S9]. It solves the problem of sampling continuous volume data at non-integer coordinates, which occurs because ray casting sample points rarely align exactly with voxel centers [S4]. Compared to nearest-neighbor interpolation, trilinear interpolation produces significantly smoother images with fewer aliasing artifacts, though it requires approximately five times more computation time [S1, S4]. It serves as the foundational reconstruction scheme for direct volume ray casting on regular grids [S1].
+Trilinear interpolation estimates the scalar field value at an arbitrary point within a voxel grid by computing a weighted average of the eight surrounding voxel corner values [S1, unofficial, S6, unofficial, S9, unofficial]. It solves the problem of sampling continuous volume data at non-integer coordinates, which occurs because ray casting sample points rarely align exactly with voxel centers [S4]. Compared to nearest-neighbor interpolation, trilinear interpolation produces significantly smoother images with fewer aliasing artifacts, though it requires approximately five times more computation time [S1, unofficial, S4].
 
 ## How it works
 **Inputs:**
-*   A 3D scalar field defined on a regular grid with dimensions $D_x \times D_y \times D_z$.
-*   A query point $P = (x, y, z)$ in voxel space.
+*   A 3D scalar field defined on a regular grid with dimensions $D_x \times D_y \times D_z$ [S2].
+*   A query point $P = (x, y, z)$ in voxel space [S8, unofficial].
 
 **Outputs:**
-*   A single scalar value $V$ representing the interpolated density or intensity at $P$.
+*   A single scalar value $V$ representing the interpolated density or intensity at $P$ [S8, unofficial].
 
 **Data Structures:**
-*   The volume data is stored in a 3D array (or flattened 1D array with row-major indexing).
-*   Voxel values are accessed via integer indices $(i, j, k)$ where $0 \le i < D_x$, $0 \le j < D_y$, $0 \le k < D_z$.
+*   The volume data is stored in a 3D array (or flattened 1D array with row-major indexing) [S1, unofficial].
+*   Voxel values are accessed via integer indices $(i, j, k)$ where $0 \le i < D_x$, $0 \le j < D_y$, $0 \le k < D_z$ [G].
 
 **Algorithm Steps:**
 
 1.  **Coordinate Normalization and Offset:**
-    If the input coordinates are in world space, convert them to voxel space. Let $P_{voxel}$ be the position in voxel coordinates. To ensure that a sample point located exactly at the center of a voxel returns that voxel's value (and not an average of neighbors), shift the coordinate by $-0.5$ along each axis [S1, S6].
+    If the input coordinates are in world space, convert them to voxel space [G]. Let $P_{voxel}$ be the position in voxel coordinates [S8, unofficial]. To ensure that a sample point located exactly at the center of a voxel returns that voxel's value (and not an average of neighbors), shift the coordinate by $-0.5$ along each axis [S1, unofficial, S6, unofficial].
     $$ P_{lattice} = P_{voxel} - 0.5 $$
-    [G] If the grid uses a rectilinear structure with non-uniform spacing, the offset and interpolation weights must be computed using the specific coordinate arrays $X, Y, Z$ rather than simple integer arithmetic [S10]. For this article, we assume a regular grid with unit cell sizes as is standard for the basic definition [S2].
+    [G] If the grid uses a rectilinear structure with non-uniform spacing, the offset and interpolation weights must be computed using the specific coordinate arrays $X, Y, Z$ rather than simple integer arithmetic [S10, unofficial]. For this article, we assume a regular grid with unit cell sizes as is standard for the basic definition [S2].
 
 2.  **Determine Containing Voxel:**
     Compute the integer indices of the lower-left-front corner of the voxel containing $P_{lattice}$ using the floor function:
     $$ i_0 = \lfloor P_{lattice}.x \rfloor $$
     $$ j_0 = \lfloor P_{lattice}.y \rfloor $$
     $$ k_0 = \lfloor P_{lattice}.z \rfloor $$
-    [G] Clamp these indices to valid bounds. Specifically, if $i_0 \ge D_x - 1$, set $i_0 = D_x - 2$ (and similarly for $j, k$) to ensure the upper neighbor index $i_0+1$ does not exceed the grid boundary [S9, S7].
+    [G] Clamp these indices to valid bounds. Specifically, if $i_0 \ge D_x - 1$, set $i_0 = D_x - 2$ (and similarly for $j, k$) to ensure the upper neighbor index $i_0+1$ does not exceed the grid boundary [S9, unofficial, S7, unofficial].
 
 3.  **Compute Fractional Weights:**
-    Calculate the fractional distance from the lower-left corner to the query point within the voxel. These fractions serve as interpolation weights.
+    Calculate the fractional distance from the lower-left corner to the query point within the voxel [S8, unofficial]. These fractions serve as interpolation weights [S9, unofficial].
     $$ w_x = P_{lattice}.x - i_0 $$
     $$ w_y = P_{lattice}.y - j_0 $$
     $$ w_z = P_{lattice}.z - k_0 $$
     Note that $w_x, w_y, w_z \in [0, 1)$.
 
 4.  **Retrieve Corner Values:**
-    Fetch the scalar values from the eight corners of the containing voxel. Let $V_{ijk}$ denote the value at grid index $(i, j, k)$. The eight values are:
+    Fetch the scalar values from the eight corners of the containing voxel [S9, unofficial]. Let $V_{ijk}$ denote the value at grid index $(i, j, k)$ [G]. The eight values are:
     *   $V_{000} = V_{i_0, j_0, k_0}$
     *   $V_{100} = V_{i_0+1, j_0, k_0}$
     *   $V_{010} = V_{i_0, j_0+1, k_0}$
@@ -50,9 +50,9 @@ Trilinear interpolation estimates the scalar field value at an arbitrary point w
     *   $V_{111} = V_{i_0+1, j_0+1, k_0+1}$
 
 5.  **Perform Trilinear Interpolation:**
-    The final value is the sum of the corner values weighted by the product of their respective distances to the query point. The weight for a corner is the product of the "closeness" factors $(1-w)$ or $w$ for each dimension.
+    The final value is the sum of the corner values weighted by the product of their respective distances to the query point [S1, unofficial]. The weight for a corner is the product of the "closeness" factors $(1-w)$ or $w$ for each dimension [S1, unofficial].
     
-    Using the expanded form [S1, S9]:
+    Using the expanded form [S1, unofficial, S9, unofficial]:
     $$
     \begin{aligned}
     V = \;& V_{000}(1-w_x)(1-w_y)(1-w_z) + V_{100}w_x(1-w_y)(1-w_z) \\
@@ -62,7 +62,7 @@ Trilinear interpolation estimates the scalar field value at an arbitrary point w
     \end{aligned}
     $$
     
-    Alternatively, this can be computed sequentially using three linear interpolations (lerp) [S2, S7]:
+    Alternatively, this can be computed sequentially using seven linear interpolations [S2]:
     1.  Interpolate along X for the bottom face ($k=k_0$) and top face ($k=k_0+1$):
         $$ C_{00} = \text{lerp}(V_{000}, V_{100}, w_x) $$
         $$ C_{10} = \text{lerp}(V_{010}, V_{110}, w_x) $$
@@ -74,7 +74,7 @@ Trilinear interpolation estimates the scalar field value at an arbitrary point w
     3.  Interpolate along Z:
         $$ V = \text{lerp}(C_0, C_1, w_z) $$
     
-    Where $\text{lerp}(a, b, t) = a(1-t) + bt$.
+    Where $\text{lerp}(a, b, t) = a(1-t) + bt$ [S4].
 
 **Pseudocode:**
 
@@ -87,13 +87,15 @@ def trilinear_interpolation(volume, dims, p_voxel):
     dims: tuple (Dx, Dy, Dz)
     p_voxel: tuple (x, y, z) in voxel space (center-aligned)
     """
+    import math
+    
     # 1. Shift by -0.5 to align voxel centers with integer grid
     p_lattice = (p_voxel[0] - 0.5, p_voxel[1] - 0.5, p_voxel[2] - 0.5)
     
     # 2. Compute lower-left indices
-    i0 = int(p_lattice[0])
-    j0 = int(p_lattice[1])
-    k0 = int(p_lattice[2])
+    i0 = math.floor(p_lattice[0])
+    j0 = math.floor(p_lattice[1])
+    k0 = math.floor(p_lattice[2])
     
     # 3. Clamp indices to ensure upper neighbors are within bounds
     # If p_lattice is exactly at the boundary, floor might give index == dim-1
@@ -135,13 +137,12 @@ def trilinear_interpolation(volume, dims, p_voxel):
 ```
 
 **Parameters:**
-*   **Grid Assumption:** Regular grid with unit lengths in all three cell dimensions [S2]. If the grid is rectilinear (non-uniform spacing), the weights $w_x, w_y, w_z$ must be calculated as normalized distances between the coordinate arrays $X, Y, Z$ [S10].
-*   **Precision:** Standard single-precision floating point is typically sufficient, but care must be taken with boundary conditions to avoid out-of-bounds memory access [S9].
+*   **Grid Assumption:** Regular grid with unit lengths in all three cell dimensions [S2]. If the grid is rectilinear (non-uniform spacing), the weights $w_x, w_y, w_z$ must be calculated as normalized distances between the coordinate arrays $X, Y, Z$ using formulas like $w_x = (x - X[i_0]) / (X[i_0+1] - X[i_0])$ [S10, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Boundary Conditions:** If the query point lies outside the volume bounds, the algorithm must handle out-of-bounds access. Common strategies include clamping the indices to the nearest valid voxel or returning a default value (e.g., 0) [S10, S9].
-*   **Center Alignment:** Without the $-0.5$ offset, a sample point at the exact center of a voxel would incorrectly average all 8 neighbors instead of returning the voxel's own value [S1, S6].
-*   **Cache Coherence:** Naive access patterns to voxel buffers can lead to poor cache coherence, significantly impacting performance [S6]. Tiled storage schemes are recommended for production [S6].
+*   **Boundary Conditions:** If the query point lies outside the volume bounds, the algorithm must handle out-of-bounds access. Common strategies include clamping the indices to the nearest valid voxel or returning a default value (e.g., 0) [S10, unofficial, S9, unofficial].
+*   **Center Alignment:** Without the $-0.5$ offset, a sample point at the exact center of a voxel would incorrectly average all 8 neighbors instead of returning the voxel's own value [S1, unofficial, S6, unofficial].
+*   **Cache Coherence:** Naive access patterns to voxel buffers can lead to poor cache coherence, significantly impacting performance [S6, unofficial]. Tiled storage schemes are recommended for production [S6, unofficial].
 *   **Artifacts:** Trilinear interpolation introduces $C^1$ discontinuities (false edges or "star patterns") because the triangular pulse reconstruction kernel has infinite extent in the frequency domain [S5]. This manifests as apparent sharpness not present in the data [S5].
 
 ## Subtopics
@@ -157,15 +158,15 @@ Semi-analytical volume rendering with trilinear interpolation is a direct volume
 
 ## Operating characteristics
 *   **Time Complexity:** $O(1)$ per sample, requiring exactly 8 memory fetches and 7 linear interpolations (or equivalent arithmetic operations) [S2, S5].
-*   **Memory Complexity:** $O(1)$ auxiliary space. The data structure is the volume grid itself, $O(N_x N_y N_z)$.
-*   **Performance:** Trilinear interpolation takes approximately 5 times longer to compute than nearest-neighbor lookup [S1]. It is significantly faster than higher-order methods like tri-cubic interpolation but provides lower image quality [S6].
-*   **Strengths:** Simple to implement, computationally efficient, produces smoother results than nearest-neighbor, widely supported by hardware texture units (often via bilinear + linear approximation) [S1027-hardware-interpolation-approximation.md].
-*   **Limitations:** Introduces blurring and $C^1$ discontinuities (false edges) [S5]. Not suitable for high-fidelity reconstruction where sharp features must be preserved without aliasing.
-*   **When to use:** General-purpose volume rendering where performance is critical and high-frequency artifacts are acceptable or mitigated by other means (e.g., supersampling).
-*   **When not to use:** When high-frequency accuracy is required (use [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) or [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md)), or when rendering rectilinear grids with significant non-uniformity without proper weight calculation [S10].
+*   **Memory Complexity:** $O(1)$ auxiliary space [G]. The data structure is the volume grid itself, $O(N_x N_y N_z)$ [G].
+*   **Performance:** Trilinear interpolation takes approximately 5 times longer to compute than nearest-neighbor lookup [S1, unofficial]. It is significantly faster than higher-order methods like tri-cubic interpolation but provides lower image quality [S6, unofficial].
+*   **Strengths:** Simple to implement, computationally efficient, produces smoother results than nearest-neighbor [S1, unofficial, S4].
+*   **Limitations:** Introduces blurring and $C^1$ discontinuities (false edges) [S5]. Not suitable for high-fidelity reconstruction where sharp features must be preserved without aliasing [G].
+*   **When to use:** General-purpose volume rendering where performance is critical and high-frequency artifacts are acceptable or mitigated by other means (e.g., supersampling) [G].
+*   **When not to use:** When high-frequency accuracy is required (use [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) or [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md)) [G].
 
 ## Background
-Trilinear interpolation is a standard technique in computer graphics and scientific visualization for sampling 3D scalar fields. It is derived from the tensor product of 1D linear interpolation kernels [S2]. The method is fundamental to direct volume ray casting on regular grids [S1]. It is implemented in various libraries, including OpenVDB, which uses a nested interpolation structure for sparse voxel grids [S1]. The mathematical properties of the trilinear interpolant, including the existence of saddle points, have been analyzed in the context of Marching Cubes and isosurface extraction [S3].
+Trilinear interpolation is a standard technique in computer graphics and scientific visualization for sampling 3D scalar fields. It is derived from the tensor product of 1D linear interpolation kernels [S2]. It is implemented in various libraries, including OpenVDB, which uses a nested interpolation structure for sparse voxel grids [S1, unofficial]. The mathematical properties of the trilinear interpolant, including the existence of saddle points, have been analyzed in the context of Marching Cubes and isosurface extraction [S3].
 
 ## Sources
 [S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
